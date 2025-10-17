@@ -542,7 +542,7 @@ def show_user_dashboard():
                     for _, task in upcoming.iterrows():
                         days_left = (task["end_date"] - pd.Timestamp.now()).days
                         emoji = "🔴" if days_left < 0 else "🟡" if days_left < 3 else "🟢"
-                        st.write(f"{emoji} {task['task']} - {task['end_date'].strftime('%b %d')}")
+                        st.write(f"{emoji} {task['task'][:15]}...")
 
     # Main content area with tabs
     tab1, tab2, tab3, tab4 = st.tabs(["🎯 My Tasks", "📅 Calendar View", "📊 Analytics", "⚙️ Settings"])
@@ -575,7 +575,7 @@ def show_task_management():
     with col4:
         sort_by = st.selectbox("Sort by", ["Due Date", "Priority", "Progress", "Recently Added"])
 
-    # Add task form
+    # Add task form - FIXED: Parameter count matches placeholders
     with st.expander("➕ Add New Task", expanded=st.session_state.get('show_quick_add', False)):
         with st.form("task_form", clear_on_submit=True):
             colA, colB = st.columns(2)
@@ -600,29 +600,36 @@ def show_task_management():
 
             submitted = st.form_submit_button("🚀 Add Task")
             if submitted and task:
-                series_id = str(uuid.uuid4()) if recurrence != "None" else None
-                c.execute("""INSERT INTO tasks
-                             (task,assigned_to,given_by,priority,status,start_date,end_date,progress,comments,
-                              recurrence,recurrence_until,series_id,category,tags,estimated_hours)
-                             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                          (task, st.session_state.username, given_by, priority, status,
-                           start_date_val.isoformat(), end_date_val.isoformat(), int(progress_val), comments,
-                           recurrence, recurrence_until.isoformat() if recurrence_until else None, series_id,
-                           category, ",".join(tags) if tags else None, estimated_hours))
-                conn.commit()
+                try:
+                    series_id = str(uuid.uuid4()) if recurrence != "None" else None
+                    recurrence_until_str = recurrence_until.isoformat() if recurrence_until else None
+                    tags_str = ",".join(tags) if tags else None
+                    
+                    # FIXED: Correct number of parameters (14 placeholders, 14 values)
+                    c.execute("""INSERT INTO tasks
+                                 (task,assigned_to,given_by,priority,status,start_date,end_date,progress,comments,
+                                  recurrence,recurrence_until,series_id,category,tags,estimated_hours)
+                                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                              (task, st.session_state.username, given_by, priority, status,
+                               start_date_val.isoformat(), end_date_val.isoformat(), int(progress_val), comments,
+                               recurrence, recurrence_until_str, series_id,
+                               category, tags_str, estimated_hours))
+                    conn.commit()
 
-                if recurrence != "None" and recurrence_until:
-                    auto_populate_recurrences(
-                        task, st.session_state.username, given_by, priority, status,
-                        start_date_val, end_date_val, progress_val, comments,
-                        recurrence, recurrence_until.isoformat(), series_id, category, 
-                        ",".join(tags) if tags else None, estimated_hours
-                    )
+                    if recurrence != "None" and recurrence_until:
+                        auto_populate_recurrences(
+                            task, st.session_state.username, given_by, priority, status,
+                            start_date_val, end_date_val, progress_val, comments,
+                            recurrence, recurrence_until_str, series_id, category, 
+                            tags_str, estimated_hours
+                        )
 
-                st.success("✅ Task(s) Added Successfully!")
-                if 'show_quick_add' in st.session_state:
-                    del st.session_state.show_quick_add
-                st.rerun()
+                    st.success("✅ Task(s) Added Successfully!")
+                    if 'show_quick_add' in st.session_state:
+                        del st.session_state.show_quick_add
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error adding task: {str(e)}")
 
     # Display tasks with enhanced filtering
     df = pd.read_sql("SELECT * FROM tasks WHERE assigned_to=?", conn, params=(st.session_state.username,))
@@ -798,19 +805,211 @@ def show_user_settings():
             st.success("Settings saved successfully!")
 
 # =========================
-# Admin Dashboard (minimal changes for dark theme)
+# COMPLETE Admin Dashboard
 # =========================
 def show_admin_dashboard():
-    # Similar enhancements can be applied to admin dashboard
-    # For brevity, keeping the original structure with dark theme
     st.sidebar.markdown("---")
     st.sidebar.write(f"🛠️ **{st.session_state.username}** (Admin)")
-    if st.sidebar.button("Logout"):
+    
+    # Admin quick actions
+    st.sidebar.subheader("Admin Actions")
+    if st.sidebar.button("👥 User Management"):
+        st.session_state.admin_view = "users"
+    if st.sidebar.button("📊 All Tasks"):
+        st.session_state.admin_view = "tasks"
+    if st.sidebar.button("📈 Analytics"):
+        st.session_state.admin_view = "analytics"
+    if st.sidebar.button("🚪 Logout"):
         do_logout()
         st.rerun()
 
     st.title("🛠️ Admin Dashboard")
-    # ... rest of admin dashboard code with dark theme applied
+
+    # Admin KPIs for all users
+    metrics = compute_scores()
+    if metrics:
+        render_kpis(metrics, ("Total Tasks", "Completion %", "On-time %", "Avg Progress", "System Score"))
+
+    # Main admin tabs
+    admin_view = st.session_state.get('admin_view', 'tasks')
+    
+    if admin_view == "users":
+        show_user_management()
+    elif admin_view == "tasks":
+        show_all_tasks()
+    else:
+        show_admin_analytics()
+
+def show_user_management():
+    st.subheader("👥 User Management")
+    
+    # Add new user
+    with st.expander("➕ Add New User"):
+        with st.form("add_user_form"):
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                new_username = st.text_input("Username")
+            with col2:
+                new_password = st.text_input("Password", type="password")
+            with col3:
+                new_role = st.selectbox("Role", ["user", "admin"])
+            
+            if st.form_submit_button("Add User"):
+                if new_username and new_password:
+                    try:
+                        c.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+                                 (new_username, make_hash(new_password), new_role))
+                        conn.commit()
+                        st.success(f"User {new_username} added successfully!")
+                    except sqlite3.IntegrityError:
+                        st.error("Username already exists!")
+                else:
+                    st.error("Please fill all fields")
+
+    # User list with actions
+    st.subheader("User List")
+    users_df = pd.read_sql("SELECT id, username, role FROM users", conn)
+    
+    if not users_df.empty:
+        for _, user in users_df.iterrows():
+            col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
+            with col1:
+                st.write(f"**{user['username']}** ({user['role']})")
+            with col2:
+                user_metrics = compute_scores(user['username'])
+                efficiency = user_metrics['Efficiency Score'] if user_metrics else 0
+                st.write(f"Score: {efficiency}")
+            with col3:
+                if st.button("Reset Password", key=f"reset_{user['id']}"):
+                    c.execute("UPDATE users SET password=? WHERE id=?", 
+                             (make_hash("temp123"), user['id']))
+                    conn.commit()
+                    st.success(f"Password reset to 'temp123' for {user['username']}")
+            with col4:
+                if user['username'] != st.session_state.username and st.button("Delete", key=f"del_{user['id']}"):
+                    c.execute("DELETE FROM users WHERE id=?", (user['id'],))
+                    conn.commit()
+                    st.success(f"User {user['username']} deleted")
+                    st.rerun()
+            st.markdown("---")
+    else:
+        st.info("No users found")
+
+def show_all_tasks():
+    st.subheader("📋 All Tasks Management")
+    
+    # Filters
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        user_filter = st.selectbox("Filter by User", 
+                                  ["All"] + pd.read_sql("SELECT DISTINCT username FROM users", conn)["username"].tolist())
+    with col2:
+        status_filter = st.multiselect("Status", ["Not Started", "In Progress", "Completed"], 
+                                      default=["Not Started", "In Progress"])
+    with col3:
+        priority_filter = st.multiselect("Priority", ["High", "Medium", "Low"], 
+                                        default=["High", "Medium", "Low"])
+
+    # Build query
+    query = "SELECT * FROM tasks WHERE 1=1"
+    params = []
+    
+    if user_filter != "All":
+        query += " AND assigned_to=?"
+        params.append(user_filter)
+    
+    if status_filter:
+        placeholders = ",".join(["?"] * len(status_filter))
+        query += f" AND status IN ({placeholders})"
+        params.extend(status_filter)
+    
+    if priority_filter:
+        placeholders = ",".join(["?"] * len(priority_filter))
+        query += f" AND priority IN ({placeholders})"
+        params.extend(priority_filter)
+
+    # Display tasks
+    df = pd.read_sql(query, conn, params=params)
+    
+    if not df.empty:
+        for _, row in df.iterrows():
+            with st.expander(f"{row['task']} - {row['assigned_to']} ({row['status']})", expanded=False):
+                show_enhanced_task_card(row, show_actions=True)
+                
+                # Admin comments
+                with st.form(key=f"admin_comment_{row['id']}"):
+                    admin_comment = st.text_area("Admin Comment", value=row.get('admin_comments', ''))
+                    if st.form_submit_button("💾 Save Admin Comment"):
+                        c.execute("UPDATE tasks SET admin_comments=? WHERE id=?", 
+                                 (admin_comment, row['id']))
+                        conn.commit()
+                        st.success("Admin comment updated!")
+                        st.rerun()
+    else:
+        st.info("No tasks found with current filters")
+
+def show_admin_analytics():
+    st.subheader("📈 System Analytics")
+    
+    # Overall metrics
+    df_all = pd.read_sql("SELECT * FROM tasks", conn)
+    users_df = pd.read_sql("SELECT username, role FROM users", conn)
+    
+    if df_all.empty:
+        st.info("No data available for analytics.")
+        return
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Total Users", len(users_df))
+    with col2:
+        st.metric("Total Tasks", len(df_all))
+    with col3:
+        completion_rate = (len(df_all[df_all['status'] == 'Completed']) / len(df_all)) * 100
+        st.metric("Overall Completion", f"{completion_rate:.1f}%")
+    with col4:
+        overdue = len(df_all[(df_all['status'] != 'Completed') & (pd.to_datetime(df_all['end_date']) < pd.Timestamp.now())])
+        st.metric("Overdue Tasks", overdue)
+    
+    # User performance comparison
+    st.subheader("👥 User Performance")
+    user_scores = []
+    for username in users_df['username']:
+        metrics = compute_scores(username)
+        if metrics:
+            user_scores.append({
+                'username': username,
+                'efficiency': metrics['Efficiency Score'],
+                'completed': metrics['Completed'],
+                'total': metrics['Total Tasks']
+            })
+    
+    if user_scores:
+        scores_df = pd.DataFrame(user_scores)
+        fig = px.bar(scores_df, x='username', y='efficiency', 
+                    title='User Efficiency Scores',
+                    color='efficiency', color_continuous_scale='Viridis')
+        fig.update_layout(
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            font_color='#FAFAFA',
+            title_font_color='#FAFAFA'
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    
+    # Task distribution charts
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        fig1 = fig_status_pie(df_all, "Overall Task Status")
+        if fig1:
+            st.plotly_chart(fig1, use_container_width=True)
+    
+    with col2:
+        fig2 = fig_priority_bar(df_all, "Tasks by Priority")
+        if fig2:
+            st.plotly_chart(fig2, use_container_width=True)
 
 # =========================
 # Auth UI with dark theme
